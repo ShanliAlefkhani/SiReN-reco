@@ -82,15 +82,33 @@ class Data_loader():
 
 
 class training_data(Dataset):
-    def __init__(self, data_class, num_ng):
+    def __init__(self, data_class, num_ng, offset):
         super(training_data, self).__init__()
         self.data = data_class
         self.num_ng = num_ng
+        self.offset = offset
         
-        pass
+        self.tr = self.data.train.values; self.tr[:,0:-1]-=1 ; self.tr[:,-1] = np.sign(self.tr[:,-1]-offset)
+        self.user_dict = dict() # (consumed items, ratings)
+        self.user_neg_candi = dict() # negative sampling candidates
+        whole_ = set(np.arange(self.data.num_v))
+        for j in range(self.data.num_u):
+            self.user_dict[j] = self.tr[self.tr[:,0]==j][:,1:]
+            self.user_neg_candi[j] = whole_ - set(self.tr[self.tr[:,0]==j][:,1])
+        
+        
+        
     
     def _uniform_ng_sample(self):
-        pass
+        self.quadruplet = []
+        for u in [j for j in self.user_dict]:
+            for i,sgn in self.user_dict[u]:
+                for t in range(self.num_ng):
+                    j = np.random.randint(0,self.data.num_v)
+                    while j in self.user_dict[u][:,0]:
+                        j = np.random.randint(0,self.data.num_v)
+                    self.quadruplet.append([u,i,j,sgn])
+        
     def _degree_ng_sample(self):
         pass
     
@@ -98,7 +116,7 @@ class training_data(Dataset):
     def __len__(self):
         return len(self.data.train) * self.num_ng
     def __getitem__(self,idx):
-        pass
+        return self.quadruplet[idx][0], self.quadruplet[idx][1], self.quadruplet[idx][2], self.quadruplet[idx][3]  # u,i,j,sgn
     
 
 
@@ -172,6 +190,11 @@ if __name__ == '__main__':
     data_class.data_load() # load whole dataset
     print("Loading complete! (loading time:%s)"%(time.time()-st))
     
+    training_ = training_data(data_class,args.K,args.offset)
+    
+    
+    
+    training_._uniform_ng_sample()
     
     
     
