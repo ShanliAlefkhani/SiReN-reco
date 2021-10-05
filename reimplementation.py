@@ -195,6 +195,7 @@ class Data_loader():
 class training_data(Dataset):
     def __init__(self, data_class, num_ng, offset):
         super(training_data, self).__init__()
+        print("Prepare training dataset...")
         self.data = data_class
         self.num_ng = num_ng
         self.offset = offset
@@ -235,14 +236,104 @@ class training_data(Dataset):
 
 
 
-def gen_top_k(data_class, r_hat, K=300):
+def gen_top_k(data_class, emb_u,emb_v, K=300):
+    emb_u = emb_u.cpu(); emb_v = emb_v.cpu()
+    r_hat = emb_u.mm(emb_v.T)
     no_item = (torch.tensor(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']))) - 1).long()
     r_hat[:,no_item] = -np.inf
     for u,i in data_class.train.values[:,:-1]-1:
         r_hat[u,i] = -np.inf
-    reco = torch.topk(r_hat,K).indices.cpu().numpy() + 1
+    reco = torch.topk(r_hat,K).indices.cpu().numpy()
     return reco
     
+
+
+class evaluator():
+    def __init__(self,data_class,reco,args,N=[10,15,20],partition=[20,50]):
+        print('*** evaluation phase ***')
+        
+        self.reco = reco
+        self.data = data_class
+        self.N = np.array(N)
+        self.threshold = round(args.offset) # to generate ground truth set
+        self.partition = partition
+        
+        
+        self.__gen_ground_truth_set()
+        self.__group_partition()
+        
+        
+    
+    def __gen_ground_truth_set(self):
+        print('*** ground truth set ***')
+        self.GT = dict()
+        temp = deepcopy(self.data.test); temp = temp[temp['rating']>=self.threshold].values[:,:-1]-1;
+        for j in range(self.data.num_u):
+            if len(temp[temp[:,0]==j][:,1]>0) :  self.GT[j] = temp[temp[:,0]==j][:,1]
+    
+    def __group_partition(self):
+        print('*** ground partition ***')
+        unique_u, counts_u = np.unique(self.data.train['userId'].values-1, return_counts=True)
+        self.G = dict()
+        self.G['group1'] = unique_u[np.argwhere(counts_u<self.partition[0])].reshape(-1)
+        temp = unique_u[np.argwhere(counts_u<self.partition[1])]
+        self.G['group2'] = np.setdiff1d(temp,self.G['group1'])
+        self.G['group3'] = np.setdiff1d(unique_u,temp)
+        self.G['total'] = unique_u
+        
+    def precision_and_recall(self):
+        print('*** precision ***')
+        self.p = dict(); self.r = dict(); leng = dict()
+        maxn = max(self.N)
+        for i in [j for j in self.G]:
+            self.p[i] = np.zeros(maxn); self.r[i] = np.zeros(maxn)
+            leng[i] = 0
+        for uid in [j for j in self.GT]:
+            leng['total']+=1
+            hit_ = np.cumsum([1.0 if item in self.GT[uid] else 0.0 for idx, item in enumerate(self.reco[uid][:maxn])])
+            self.p['total']+=hit_/ np.arange(1,maxn+1); self.r['total']+=hit_/len(self.GT[uid])
+            if uid in self.G['group1']:
+                self.p['group1']+=hit_/ np.arange(1,maxn+1); self.r['group1']+=hit_/len(self.GT[uid])
+                leng['group1']+=1
+            elif uid in self.G['group2']:
+                self.p['group2']+=hit_/ np.arange(1,maxn+1); self.r['group2']+=hit_/len(self.GT[uid])
+                leng['group2']+=1
+            elif uid in self.G['group3']:
+                self.p['group3']+=hit_/ np.arange(1,maxn+1); self.r['group3']+=hit_/len(self.GT[uid])
+                leng['group3']+=1
+        for i in [j for j in self.G]:
+            self.p[i]/=leng[i]; self.r[i]/=leng[i]; 
+            
+    def normalized_DCG(self):
+        print('*** nDCG ***')
+        self.nDCG = dict(); leng=dict()
+        maxn = max(self.N)
+        
+        for i in [j for j in self.G]:
+            self.nDCG[i] = np.zeros(maxn)
+            leng[i] = 0
+        for uid in [j for j in self.GT]:
+            leng['total']+=1
+            idcg_len = min(len(self.GT[uid]),maxn)
+            temp_idcg = np.cumsum(1.0 / np.log2(np.arange(2,maxn+2)))
+            temp_idcg[idcg_len:]=temp_idcg[idcg_len-1]
+            temp_dcg = np.cumsum([1.0/np.log2(idx+2) if item in self.GT[uid] else 0.0 for idx, item in enumerate(self.reco[uid][:maxn])])
+            self.nDCG['total']+=temp_dcg / temp_idcg
+            if uid in self.G['group1']:
+                self.nDCG['group1']+=temp_dcg / temp_idcg
+                leng['group1']+=1
+            elif uid in self.G['group2']:
+                self.nDCG['group2']+=temp_dcg / temp_idcg
+                leng['group2']+=1
+            elif uid in self.G['group3']:
+                self.nDCG['group3']+=temp_dcg / temp_idcg
+                leng['group3']+=1
+        for i in [j for j in self.G]:
+            self.nDCG[i]/=leng[i];
+    
+
+
+
 
 
 
@@ -272,7 +363,7 @@ if __name__ == '__main__':
                         )
     parser.add_argument('--lr',
                         type = float,
-                        default = 5e-3,
+                        default = 1e-3,
                         help = "Learning rate"
                         )
     parser.add_argument('--offset',
@@ -302,7 +393,7 @@ if __name__ == '__main__':
                         )
     parser.add_argument('--reg',
                         type = float,
-                        default = 0.05,
+                        default = 0.01,
                         help = "Regularization coefficient"
                         )
     args = parser.parse_args()
@@ -345,10 +436,22 @@ if __name__ == '__main__':
         pbar.close()
             
         
-        if EPOCH%20 ==0:
+        if EPOCH%5 ==0:
+            model.eval()
             emb_u, emb_v = model.aggregate()
-            r_hat = emb_u.mm(emb_v.T)
-            reco = gen_top_k(data_class,r_hat)
+            # r_hat = emb_u.mm(emb_v.T)
+            reco = gen_top_k(data_class,emb_u,emb_v)
+            
+            eval_ = evaluator(data_class,reco,args)
+            eval_.precision_and_recall()
+            eval_.normalized_DCG()
+            print("\n***************************************************************************************")
+            print(" /* Recommendation Accuracy */")
+            print('Precision at [10, 15, 20] :: ',eval_.p['total'][eval_.N-1])
+            print('Recall at [10, 15, 20] :: ',eval_.r['total'][eval_.N-1])
+            print('nDCG at [10, 15, 20] :: ',eval_.nDCG['total'][eval_.N-1])
+            print("***************************************************************************************")
+            model.train()
                         
         
     
