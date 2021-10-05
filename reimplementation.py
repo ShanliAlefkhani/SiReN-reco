@@ -94,8 +94,10 @@ class SiReN(nn.Module):
             x = self.convs[i](x,self.data_p.edge_index)
             POS.append(x)
         z_p = sum(POS)/len(POS)
-            
+        emb_u, emb_v = torch.split(z_p,[self.data.num_u,self.data.num_v])
         
+        return emb_u, emb_v
+    def temp(self):
         # negative graph
         y = F.relu(self.mlps[0](self.embeddings_neg.weight))
         for i in range(1, self.args.MLP_layers):
@@ -236,14 +238,13 @@ class training_data(Dataset):
 
 
 
-def gen_top_k(data_class, emb_u,emb_v, K=300):
-    emb_u = emb_u.cpu(); emb_v = emb_v.cpu()
-    r_hat = emb_u.mm(emb_v.T)
+def gen_top_k(data_class, r_hat, K=300):
+    
     no_item = (torch.tensor(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']))) - 1).long()
     r_hat[:,no_item] = -np.inf
     for u,i in data_class.train.values[:,:-1]-1:
         r_hat[u,i] = -np.inf
-    reco = torch.topk(r_hat,K).indices.cpu().numpy()
+    reco = torch.topk(r_hat,K).indices.numpy()
     return reco
     
 
@@ -342,7 +343,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset',
                         type = str,
-                        default = 'ML-1M',
+                        default = 'gowalla',
                         help = "Dataset"
                         )
     parser.add_argument('--version',
@@ -373,7 +374,7 @@ if __name__ == '__main__':
                         )
     parser.add_argument('--K',
                         type = int,
-                        default = 5,
+                        default = 1,
                         help = "The number of negative samples"
                         )
     parser.add_argument('--num_layers',
@@ -393,7 +394,7 @@ if __name__ == '__main__':
                         )
     parser.add_argument('--reg',
                         type = float,
-                        default = 0.01,
+                        default = 0.0001,
                         help = "Regularization coefficient"
                         )
     args = parser.parse_args()
@@ -436,17 +437,18 @@ if __name__ == '__main__':
         pbar.close()
             
         
-        if EPOCH%5 ==0:
+        if EPOCH%1 ==0:
             model.eval()
             emb_u, emb_v = model.aggregate()
-            # r_hat = emb_u.mm(emb_v.T)
-            reco = gen_top_k(data_class,emb_u,emb_v)
-            
+            emb_u = emb_u.cpu().detach(); emb_v = emb_v.cpu().detach()
+            r_hat = emb_u.mm(emb_v.T)
+            reco = gen_top_k(data_class,r_hat)
             eval_ = evaluator(data_class,reco,args)
             eval_.precision_and_recall()
             eval_.normalized_DCG()
             print("\n***************************************************************************************")
             print(" /* Recommendation Accuracy */")
+            print('N :: %s'%(eval_.N))
             print('Precision at [10, 15, 20] :: ',eval_.p['total'][eval_.N-1])
             print('Recall at [10, 15, 20] :: ',eval_.r['total'][eval_.N-1])
             print('nDCG at [10, 15, 20] :: ',eval_.nDCG['total'][eval_.N-1])
