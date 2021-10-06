@@ -15,7 +15,7 @@ import torch
 from tqdm import tqdm
 from torch import Tensor, nn, optim
 from torch_geometric.nn import MessagePassing
-from torch_geometric.utils import add_self_loops, degree
+from torch_geometric.utils import add_self_loops, degree, get_laplacian
 from torch_geometric.data import Data
 from copy import deepcopy
 import torch.nn.functional as F
@@ -52,7 +52,22 @@ class SiReN(nn.Module):
         edge_ = torch.stack((torch.cat((edge_user,edge_item),0),torch.cat((edge_item,edge_user),0)),0)
         self.data_p = Data(edge_index = edge_).to(device)
         self.__init_weight()
+        self.get_normed_adj()
+    def get_normed_adj(self):
+        num_nodes = self.data.num_u + self.data.num_v
+        indices, values = get_laplacian(self.data_p.edge_index, normalization = "sym", num_nodes = num_nodes)
+        iden = torch.vstack((torch.arange(0,num_nodes),torch.arange(0,num_nodes)))
+        values_iden = torch.ones(num_nodes)
+        if torch.cuda.is_available():
+            I = torch.sparse.FloatTensor(iden,values_iden,size = (num_nodes,num_nodes)).cuda()
+        else:
+            I = torch.sparse.FloatTensor(iden,values_iden,size = (num_nodes,num_nodes))
+        self.L = torch.sparse.FloatTensor(indices,-values,size=(num_nodes,num_nodes)) + I
         
+        
+        
+    
+    
     def __init_weight(self):
         # generate embeddings
         self.embeddings_pos = nn.Embedding(num_embeddings = self.data.num_u + self.data.num_v , embedding_dim = self.args.dim)
@@ -88,16 +103,24 @@ class SiReN(nn.Module):
         
         # positive graph
         POS = [self.embeddings_pos.weight]
-        x = self.convs[0](self.embeddings_pos.weight,self.data_p.edge_index)
-        POS.append(x)
+        x = self.embeddings_pos.weight
         for i in range(1,self.args.num_layers):
-            x = self.convs[i](x,self.data_p.edge_index)
+            x = self.L.mm(x)
             POS.append(x)
-        z_p = sum(POS)/len(POS)
-        emb_u, emb_v = torch.split(z_p,[self.data.num_u,self.data.num_v])
+        # torch-geometric
+        # x = self.convs[0](self.embeddings_pos.weight,self.data_p.edge_index)
+        # POS.append(x)
+        # for i in range(1,self.args.num_layers):
+        #     x = self.convs[i](x,self.data_p.edge_index)
+        #     POS.append(x)
         
-        return emb_u, emb_v
-    def temp(self):
+        # z_p = sum(POS)/len(POS)
+        z_p = torch.stack(POS,dim=1)
+        z_p = torch.mean(z_p,dim=1)
+        # emb_u, emb_v = torch.split(z_p,[self.data.num_u,self.data.num_v])
+        
+    #     return emb_u, emb_v
+    # def temp(self):
         # negative graph
         y = F.relu(self.mlps[0](self.embeddings_neg.weight))
         for i in range(1, self.args.MLP_layers):
@@ -258,7 +281,7 @@ class evaluator():
         self.N = np.array(N)
         self.threshold = round(args.offset) # to generate ground truth set
         self.partition = partition
-        
+        self.no_item = (np.array(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']))) - 1)
         
         self.__gen_ground_truth_set()
         self.__group_partition()
@@ -270,7 +293,8 @@ class evaluator():
         self.GT = dict()
         temp = deepcopy(self.data.test); temp = temp[temp['rating']>=self.threshold].values[:,:-1]-1;
         for j in range(self.data.num_u):
-            if len(temp[temp[:,0]==j][:,1]>0) :  self.GT[j] = temp[temp[:,0]==j][:,1]
+            # if len(temp[temp[:,0]==j][:,1]>0) :  self.GT[j] = temp[temp[:,0]==j][:,1]
+            if len(np.setdiff1d(temp[temp[:,0]==j][:,1],self.no_item))>0 :  self.GT[j] = np.setdiff1d(temp[temp[:,0]==j][:,1],self.no_item)
     
     def __group_partition(self):
         print('*** ground partition ***')
@@ -343,7 +367,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset',
                         type = str,
-                        default = 'gowalla',
+                        default = 'ML-1M',
                         help = "Dataset"
                         )
     parser.add_argument('--version',
@@ -374,12 +398,12 @@ if __name__ == '__main__':
                         )
     parser.add_argument('--K',
                         type = int,
-                        default = 1,
+                        default = 5,
                         help = "The number of negative samples"
                         )
     parser.add_argument('--num_layers',
                         type = int,
-                        default = 4,
+                        default = 2,
                         help = "The number of layers of a GNN model for the graph with positive edges"
                         )
     parser.add_argument('--MLP_layers',
@@ -394,7 +418,7 @@ if __name__ == '__main__':
                         )
     parser.add_argument('--reg',
                         type = float,
-                        default = 0.0001,
+                        default = 5e-5,
                         help = "Regularization coefficient"
                         )
     args = parser.parse_args()
@@ -408,7 +432,7 @@ if __name__ == '__main__':
     data_class.data_load() # load whole dataset
     print("Loading complete! (loading time:%s)"%(time.time()-st))
     print('dataset :: %s with version %s'%(args.dataset,args.version))
-    
+    # data_class.train = data_class.train[data_class.train['rating']>3.5] # LightGCN
     
     
     # model preparation
