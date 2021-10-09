@@ -39,13 +39,65 @@ class LightGConv(MessagePassing):
         return norm.view(-1,1) * x_j
     def update(self,inputs: Tensor) -> Tensor:
         return inputs
+
+class sBPRLoss(nn.Module):
+    def __init__(self,gamma=1e-10):
+        super(sBPRLoss, self).__init__()
+        self.gamma = gamma
+    def forward(self,pos_score,neg_score,sgn):
+        loss = -torch.log(self.gamma + torch.sigmoid(sgn * pos_score - neg_score)).mean()
+        return loss
     
+class EmbLoss(nn.Module):
+    """ EmbLoss, regularization on embeddings
+
+    """
+
+    def __init__(self, norm=2):
+        super(EmbLoss, self).__init__()
+        self.norm = norm
+
+    def forward(self, *embeddings):
+        emb_loss = torch.zeros(1).to(embeddings[-1].device)
+        for embedding in embeddings:
+            emb_loss += torch.norm(embedding, p=self.norm)
+        emb_loss /= embeddings[-1].shape[0]
+        return emb_loss
+class BPRLoss(nn.Module):
+    """ BPRLoss, based on Bayesian Personalized Ranking
+
+    Args:
+        - gamma(float): Small value to avoid division by zero
+
+    Shape:
+        - Pos_score: (N)
+        - Neg_score: (N), same shape as the Pos_score
+        - Output: scalar.
+
+    Examples::
+
+        >>> loss = BPRLoss()
+        >>> pos_score = torch.randn(3, requires_grad=True)
+        >>> neg_score = torch.randn(3, requires_grad=True)
+        >>> output = loss(pos_score, neg_score)
+        >>> output.backward()
+    """
+
+    def __init__(self, gamma=1e-10):
+        super(BPRLoss, self).__init__()
+        self.gamma = gamma
+
+    def forward(self, pos_score, neg_score):
+        loss = -torch.log(self.gamma + torch.sigmoid(pos_score - neg_score)).mean()
+        return loss
+
 class SiReN(nn.Module):
     def __init__(self, data_class, args, device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")):
         super(SiReN,self).__init__()
         self.data = data_class
         self.args = args
-        
+        self.mf_loss = sBPRLoss()
+        self.reg_loss = EmbLoss()
         
         edge_user = torch.tensor(self.data.train[self.data.train['rating']>self.args.offset]['userId'].values-1)
         edge_item = torch.tensor(self.data.train[self.data.train['rating']>self.args.offset]['movieId'].values-1) + self.data.num_u
@@ -53,6 +105,7 @@ class SiReN(nn.Module):
         self.data_p = Data(edge_index = edge_).to(device)
         self.__init_weight()
         self.get_normed_adj()
+        
     def get_normed_adj(self):
         num_nodes = self.data.num_u + self.data.num_v
         indices, values = get_laplacian(self.data_p.edge_index, normalization = "sym", num_nodes = num_nodes)
@@ -70,8 +123,10 @@ class SiReN(nn.Module):
     
     def __init_weight(self):
         # generate embeddings
-        self.embeddings_pos = nn.Embedding(num_embeddings = self.data.num_u + self.data.num_v , embedding_dim = self.args.dim)
-        self.embeddings_neg = nn.Embedding(num_embeddings = self.data.num_u + self.data.num_v , embedding_dim = self.args.dim)
+        self.embeddings_pos_u = nn.Embedding(num_embeddings = self.data.num_u, embedding_dim = self.args.dim)
+        self.embeddings_pos_i = nn.Embedding(num_embeddings = self.data.num_v, embedding_dim = self.args.dim)
+        self.embeddings_neg_u = nn.Embedding(num_embeddings = self.data.num_u, embedding_dim = self.args.dim)
+        self.embeddings_neg_i = nn.Embedding(num_embeddings = self.data.num_v, embedding_dim = self.args.dim)
         
         # convs for pos
         self.convs = nn.ModuleList()
@@ -89,24 +144,34 @@ class SiReN(nn.Module):
         self.attn_softmax = nn.Softmax(dim=1)
         
         # Xavier initialization
-        nn.init.xavier_uniform_(self.embeddings_pos.weight)
-        nn.init.xavier_uniform_(self.embeddings_neg.weight)
+        nn.init.xavier_uniform_(self.embeddings_pos_u.weight.data)
+        nn.init.xavier_uniform_(self.embeddings_pos_i.weight.data)
+        nn.init.xavier_uniform_(self.embeddings_neg_u.weight.data)
+        nn.init.xavier_uniform_(self.embeddings_neg_i.weight.data)
         for _ in range(self.args.MLP_layers): 
-            nn.init.xavier_uniform_(self.mlps[_].weight)
-            nn.init.constant_(self.mlps[_].bias,0)
-        nn.init.xavier_uniform_(self.attn.weight)
-        nn.init.constant_(self.attn.bias,0)
-        nn.init.xavier_uniform_(self.q.weight)
+            nn.init.xavier_uniform_(self.mlps[_].weight.data)
+            nn.init.constant_(self.mlps[_].bias.data,0)
+        nn.init.xavier_uniform_(self.attn.weight.data)
+        nn.init.constant_(self.attn.bias.data,0)
+        nn.init.xavier_uniform_(self.q.weight.data)
         
-        
+    def get_ego_embeddings(self):
+        emb_pos = torch.cat([self.embeddings_pos_u.weight,self.embeddings_pos_i.weight],dim=0)
+        emb_neg = torch.cat([self.embeddings_neg_u.weight,self.embeddings_neg_i.weight],dim=0)
+        return emb_pos, emb_neg
     def aggregate(self):
         
+        ego_pos, ego_neg = self.get_ego_embeddings()
         # positive graph
-        POS = [self.embeddings_pos.weight]
-        x = self.embeddings_pos.weight
+        POS = [ego_pos]
+        x = ego_pos
+        # POS = [self.embeddings_pos.weight]
+        # x = self.embeddings_pos.weight
         for i in range(1,self.args.num_layers):
-            x = self.L.mm(x)
+            x = torch.sparse.mm(self.L, x)
+            # x = self.L.mm(x)
             POS.append(x)
+            
         # torch-geometric
         # x = self.convs[0](self.embeddings_pos.weight,self.data_p.edge_index)
         # POS.append(x)
@@ -117,24 +182,28 @@ class SiReN(nn.Module):
         # z_p = sum(POS)/len(POS)
         z_p = torch.stack(POS,dim=1)
         z_p = torch.mean(z_p,dim=1)
-        # emb_u, emb_v = torch.split(z_p,[self.data.num_u,self.data.num_v])
-        
-    #     return emb_u, emb_v
-    # def temp(self):
+
         # negative graph
-        y = F.relu(self.mlps[0](self.embeddings_neg.weight))
+        y = F.dropout(F.relu(self.mlps[0](ego_neg)),p=0.5,training=self.training)
+        # y = F.relu(self.mlps[0](self.embeddings_neg.weight))
         for i in range(1, self.args.MLP_layers):
             y = self.mlps[i](y)
             y = F.relu(y)
-        y = F.dropout(y,p=0.5,training=self.training)
+            y = F.dropout(y,p=0.5,training=self.training)
         z_n = y
         
         # Combine
-        w_p = F.dropout(self.q(torch.tanh(self.attn(z_p))),p=0.5,training=self.training)
-        w_n = F.dropout(self.q(torch.tanh(self.attn(z_n))),p=0.5,training=self.training)
-        alpha_ = self.attn_softmax(torch.cat([w_p,w_n],dim=1))
+        # w_p = F.dropout(self.q(torch.tanh(self.attn(z_p))),p=0.5,training=self.training)
+        # w_n = F.dropout(self.q(torch.tanh(self.attn(z_n))),p=0.5,training=self.training)
+        # alpha_ = self.attn_softmax(torch.cat([w_p,w_n],dim=1))
         
+        # Z = alpha_[:,0].view(len(z_p),1) * z_p + alpha_[:,1].view(len(z_p),1) * z_n
+        
+        w_p = self.q(F.dropout(torch.tanh((self.attn(z_p))),p=0.5,training=self.training))
+        w_n = self.q(F.dropout(torch.tanh((self.attn(z_n))),p=0.5,training=self.training))
+        alpha_ = self.attn_softmax(torch.cat([w_p,w_n],dim=1))
         Z = alpha_[:,0].view(len(z_p),1) * z_p + alpha_[:,1].view(len(z_p),1) * z_n
+        
         
         emb_u, emb_v = torch.split(Z,[self.data.num_u,self.data.num_v])
         
@@ -147,11 +216,26 @@ class SiReN(nn.Module):
         sgn = sgn.to("cuda:0" if torch.cuda.is_available() else "cpu")
         pos_scores = torch.mul(u_, i_).sum(dim=1)
         neg_scores = torch.mul(u_,j_).sum(dim=1)
-        sBPRloss = -torch.log(gamma + torch.sigmoid(sgn * pos_scores - neg_scores)).mean()
         
-        reg_loss = self.args.reg * (u_**2 + i_**2 + j_**2).sum(dim=-1).mean()
+        # Recbole likely
+        # sBPRloss_ = self.mf_loss(pos_scores,neg_scores,sgn)
+        # reg_loss = self.args.reg * self.reg_loss(u_, i_, j_) # for siren
         
-        return sBPRloss + reg_loss
+        # for lightGCN
+        # sBPRloss_ = self.mf_loss(pos_scores,neg_scores)
+        # u_ego = self.embeddings_pos(u.cuda()); 
+        # i_ego = self.embeddings_pos((i+self.data.num_u).cuda()); 
+        # j_ego = self.embeddings_pos((j+self.data.num_u).cuda())
+        # reg_loss = self.args.reg * self.reg_loss(u_ego, i_ego, j_ego)
+        
+        # original
+        sBPRloss_ = -torch.log(gamma + torch.sigmoid(sgn * pos_scores - neg_scores)).mean()
+        reg_loss = self.args.reg * (u_.norm(p=2,dim=1).pow(2).mean()+i_.norm(p=2,dim=1).pow(2).mean()+j_.norm(p=2,dim=1).pow(2).mean())
+        # reg_loss = self.args.reg * (torch.norm(u_,p=2)**2 + torch.norm(i_,p=2)**2 + torch.norm(j_,p=2)**2).mean()
+        # reg_loss = self.args.reg * self.reg_loss(u_, i_, j_)  # L2 regularization of embeddings
+        
+        
+        return sBPRloss_ + reg_loss
 
 
 
@@ -263,7 +347,9 @@ class training_data(Dataset):
 
 def gen_top_k(data_class, r_hat, K=300):
     
-    no_item = (torch.tensor(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']))) - 1).long()
+    # no_item = (torch.tensor(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']))) - 1).long()
+    # no_item = (torch.tensor(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']) -set(data_class.test['movieId'])  )) - 1).long()
+    no_item = (torch.tensor(list(set(np.arange(1,data_class.num_v+1)) -set(data_class.test['movieId'])  )) - 1).long()
     r_hat[:,no_item] = -np.inf
     for u,i in data_class.train.values[:,:-1]-1:
         r_hat[u,i] = -np.inf
@@ -281,7 +367,9 @@ class evaluator():
         self.N = np.array(N)
         self.threshold = round(args.offset) # to generate ground truth set
         self.partition = partition
-        self.no_item = (np.array(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']))) - 1)
+        # self.no_item = (np.array(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']))) - 1)
+        # self.no_item = (np.array(list(set(np.arange(1,data_class.num_v+1)) - set(data_class.train['movieId']) -set(data_class.test['movieId'])  )) - 1)
+        self.no_item = (np.array(list(set(np.arange(1,data_class.num_v+1)) -set(data_class.test['movieId'])  )) - 1)
         
         self.__gen_ground_truth_set()
         self.__group_partition()
@@ -367,7 +455,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset',
                         type = str,
-                        default = 'ML-1M',
+                        default = 'yelp',
                         help = "Dataset"
                         )
     parser.add_argument('--version',
@@ -398,7 +486,7 @@ if __name__ == '__main__':
                         )
     parser.add_argument('--K',
                         type = int,
-                        default = 5,
+                        default = 1,
                         help = "The number of negative samples"
                         )
     parser.add_argument('--num_layers',
@@ -418,13 +506,13 @@ if __name__ == '__main__':
                         )
     parser.add_argument('--reg',
                         type = float,
-                        default = 5e-5,
+                        default = 1e-5,
                         help = "Regularization coefficient"
                         )
     args = parser.parse_args()
     
     
-    
+    # import IPython; IPython.embed(); exit(1)
     print("Data loading...")
     st = time.time()
     data_class = Data_loader(args.dataset, args.version)
@@ -433,6 +521,7 @@ if __name__ == '__main__':
     print("Loading complete! (loading time:%s)"%(time.time()-st))
     print('dataset :: %s with version %s'%(args.dataset,args.version))
     # data_class.train = data_class.train[data_class.train['rating']>3.5] # LightGCN
+    data_class.test = data_class.test[data_class.test['rating']>3.5] # LightGCN
     
     
     # model preparation
@@ -445,11 +534,21 @@ if __name__ == '__main__':
     
     # dataset preparation
     training_ = training_data(data_class,args.K,args.offset)
+    
+    ## initial evaluator gen ##
+    model.eval()
+    emb_u, emb_v = model.aggregate()
+    emb_u = emb_u.cpu().detach(); emb_v = emb_v.cpu().detach()
+    r_hat = emb_u.mm(emb_v.T)
+    reco = gen_top_k(data_class,r_hat)
+    eval_ = evaluator(data_class,reco,args)
+    model.train()
     for EPOCH in range(1,args.epoch-1):
         training_._uniform_ng_sample()
         
         LOSS = 0
-        ds = DataLoader(training_,batch_size = args.batch_size * args.K, shuffle=True)
+        # ds = DataLoader(training_,batch_size = args.batch_size * args.K, shuffle=True)
+        ds = DataLoader(training_,batch_size = args.batch_size , shuffle=True)
         pbar = tqdm(desc = 'Version {} :: Epoch {}/{}'.format(args.version,EPOCH,args.epoch),total=len(ds),position=0)
         for batch_idx, (u,i,j,sgn) in enumerate(ds):
             optimizer.zero_grad()
@@ -467,15 +566,22 @@ if __name__ == '__main__':
             emb_u = emb_u.cpu().detach(); emb_v = emb_v.cpu().detach()
             r_hat = emb_u.mm(emb_v.T)
             reco = gen_top_k(data_class,r_hat)
-            eval_ = evaluator(data_class,reco,args)
+            # eval_ = evaluator(data_class,reco,args)
+            eval_.reco=reco
             eval_.precision_and_recall()
             eval_.normalized_DCG()
+            if EPOCH == 1 : best = deepcopy(eval_); best_ep = EPOCH;
+            if best.p['total'][9] < eval_.p['total'][9] : best = deepcopy(eval_); best_ep = EPOCH;
             print("\n***************************************************************************************")
             print(" /* Recommendation Accuracy */")
             print('N :: %s'%(eval_.N))
             print('Precision at [10, 15, 20] :: ',eval_.p['total'][eval_.N-1])
             print('Recall at [10, 15, 20] :: ',eval_.r['total'][eval_.N-1])
             print('nDCG at [10, 15, 20] :: ',eval_.nDCG['total'][eval_.N-1])
+            print(" /* Best performance */")
+            print('Precision at [10, 15, 20] :: ',best.p['total'][eval_.N-1])
+            print('Recall at [10, 15, 20] :: ',best.r['total'][eval_.N-1])
+            print('nDCG at [10, 15, 20] :: ',best.nDCG['total'][eval_.N-1])
             print("***************************************************************************************")
             model.train()
                         
