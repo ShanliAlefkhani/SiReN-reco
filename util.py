@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 
 
-class bipartite_dataset(Dataset):  
+class bipartite_dataset(Dataset):
     def __init__(self, train,neg_dist,offset,num_u,num_v,K): 
         self.edge_1 = torch.tensor(train['userId'].values-1)
         self.edge_2 = torch.tensor(train['movieId'].values-1) +num_u
