@@ -4,6 +4,10 @@ from torch_geometric.data import Data
 from convols import LightGConv
 import torch.nn.functional as F
 
+from sgcn import SignedGCNTrainer
+from param_parser import parameter_parser
+from utils import tab_printer, read_graph
+
 
 class SiReN(nn.Module):
     def __init__(self, train, num_u, num_v, offset, num_layers=2, MLP_layers=2, dim=64, reg=1e-4,
@@ -19,8 +23,14 @@ class SiReN(nn.Module):
         edge_user = torch.tensor(train[train['rating']>offset]['userId'].values-1)
         edge_item = torch.tensor(train[train['rating']>offset]['movieId'].values-1)+self.M
 
-        edge_ = torch.stack((torch.cat((edge_user,edge_item),0),torch.cat((edge_item,edge_user),0)),0)
-        self.data_p=Data(edge_index=edge_)
+        edge_user_n = torch.tensor(train[train['rating'] <= offset]['userId'].values - 1)
+        edge_item_n = torch.tensor(train[train['rating'] <= offset]['movieId'].values - 1) + self.M
+
+        edge_p = torch.stack((torch.cat((edge_user,edge_item),0),torch.cat((edge_item,edge_user),0)),0)
+        self.data_p = Data(edge_index=edge_p)
+
+        edge_n = torch.stack((torch.cat((edge_user_n,edge_item_n),0),torch.cat((edge_item_n,edge_user_n),0)),0)
+        self.data_n = Data(edge_index=edge_n)
 
         # For the graph with positive edges (LightGCN)
         self.E = nn.Parameter(torch.empty(self.M + self.N, dim))
@@ -34,6 +44,19 @@ class SiReN(nn.Module):
         # For the graph with negative edges
         self.E2 = nn.Parameter(torch.empty(self.M + self.N, dim))
         nn.init.xavier_normal_(self.E2.data)
+
+        args2 = parameter_parser()
+        tab_printer(args2)
+        edges = read_graph(args2)
+        edges2 = {
+            "positive_edges": torch.transpose(self.data_p.to_dict()["edge_index"], 0, 1).tolist(),
+            "negative_edges": torch.transpose(self.data_n.to_dict()["edge_index"], 0, 1).tolist(),
+            "ecount": 0,
+            "ncount": self.M + self.N,
+        }
+        trainer = SignedGCNTrainer(args2, edges2)
+        trainer.setup_dataset()
+        self.z = trainer.create_and_train_model()
 
         for _ in range(MLP_layers):
             self.mlps.append(nn.Linear(dim,dim,bias=True))
@@ -73,7 +96,7 @@ class SiReN(nn.Module):
         w_n = self.q(F.dropout(torch.tanh((self.attn(z_n))), p=0.5, training=self.training))
         alpha_ = self.attn_softmax(torch.cat([w_p, w_n], dim=1))
         Z = alpha_[:, 0].view(len(z_p), 1) * z_p + alpha_[:, 1].view(len(z_p), 1) * z_n
-        return Z
+        return self.z
     
     def forward(self, u, v, w, n, device):
         emb = self.aggregate()
