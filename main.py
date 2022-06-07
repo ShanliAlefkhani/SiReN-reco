@@ -5,14 +5,14 @@ from torch import optim
 
 from tqdm import tqdm
 from evaluator import evaluator as ev
-from util import bipartite_dataset, deg_dist, gen_top_k
-from data_loader import Data_loader
+from util import BipartiteDataset, deg_dist, gen_top_k
+from dataloader import SiReNDataLoader
 from siren import SiReN
 import argparse
 
 
 def main(args):
-    data_class = Data_loader(args.dataset, args.version)
+    data_class = SiReNDataLoader(args.dataset, args.version)
     print('data loading...')
     st = time.time()
     train, test = data_class.data_load()
@@ -35,13 +35,13 @@ def main(args):
 
     print("\nTraining on {}...\n".format(device))
     model.train()
-    training_dataset = bipartite_dataset(train, neg_dist, args.offset, data_class.num_u, data_class.num_v, args.K)
+    training_dataset = BipartiteDataset(train, neg_dist, args.offset, data_class.num_u, data_class.num_v, args.K)
 
     for EPOCH in range(1, args.epoch + 1):
         if EPOCH % 20 - 1 == 0:
-            training_dataset.negs_gen_EP(20)
+            training_dataset.negs_gen_ep(20)
 
-        LOSS = 0
+        # LOSS = 0
         training_dataset.edge_4 = training_dataset.edge_4_tot[:, :, EPOCH % 20 - 1]
 
         ds = DataLoader(training_dataset, batch_size=args.batch_size, shuffle=True)
@@ -54,7 +54,7 @@ def main(args):
             loss = model(u, v, w, negs, device)  # original
             loss.backward()
             optimizer.step()
-            LOSS += loss.item() * len(ds)
+            # LOSS += loss.item() * len(ds)
 
             pbar.update(1)
             pbar.set_postfix({'loss': loss.item()})
