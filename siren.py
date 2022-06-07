@@ -12,24 +12,25 @@ from utils import tab_printer, read_graph
 class SiReN(nn.Module):
     def __init__(self, train, num_u, num_v, offset, num_layers=2, MLP_layers=2, dim=64, reg=1e-4,
                  device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")):
-        super(SiReN,self).__init__()
-        self.M = num_u; self.N = num_v
+        super(SiReN, self).__init__()
+        self.M = num_u
+        self.N = num_v
         self.num_layers = num_layers
         self.MLP_layers = MLP_layers
         self.device = device
         self.reg = reg
         self.embed_dim = dim
 
-        edge_user = torch.tensor(train[train['rating']>offset]['userId'].values-1)
-        edge_item = torch.tensor(train[train['rating']>offset]['movieId'].values-1)+self.M
+        edge_user = torch.tensor(train[train['rating'] > offset]['userId'].values-1)
+        edge_item = torch.tensor(train[train['rating'] > offset]['movieId'].values-1)+self.M
 
         edge_user_n = torch.tensor(train[train['rating'] <= offset]['userId'].values - 1)
         edge_item_n = torch.tensor(train[train['rating'] <= offset]['movieId'].values - 1) + self.M
 
-        edge_p = torch.stack((torch.cat((edge_user,edge_item),0),torch.cat((edge_item,edge_user),0)),0)
+        edge_p = torch.stack((torch.cat((edge_user, edge_item), 0), torch.cat((edge_item, edge_user), 0)), 0)
         self.data_p = Data(edge_index=edge_p)
 
-        edge_n = torch.stack((torch.cat((edge_user_n,edge_item_n),0),torch.cat((edge_item_n,edge_user_n),0)),0)
+        edge_n = torch.stack((torch.cat((edge_user_n, edge_item_n), 0), torch.cat((edge_item_n, edge_user_n), 0)), 0)
         self.data_n = Data(edge_index=edge_n)
 
         # For the graph with positive edges (LightGCN)
@@ -59,12 +60,12 @@ class SiReN(nn.Module):
         self.z = trainer.create_and_train_model()
 
         for _ in range(MLP_layers):
-            self.mlps.append(nn.Linear(dim,dim,bias=True))
+            self.mlps.append(nn.Linear(dim, dim, bias=True))
             nn.init.xavier_normal_(self.mlps[-1].weight.data)
 
         # Attntion model
-        self.attn = nn.Linear(dim,dim,bias=True)
-        self.q = nn.Linear(dim,1,bias=False)
+        self.attn = nn.Linear(dim, dim, bias=True)
+        self.q = nn.Linear(dim, 1, bias=False)
         self.attn_softmax = nn.Softmax(dim=1)
         
     def aggregate(self):
