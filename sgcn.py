@@ -230,6 +230,7 @@ class SignedGCNTrainer(object):
                                           weight_decay=self.args.weight_decay)
         self.model.train()
         self.epochs = trange(self.args.epochs, desc="Loss")
+        z_list = []
         for epoch in self.epochs:
             start_time = time.time()
             self.optimizer.zero_grad()
@@ -240,8 +241,9 @@ class SignedGCNTrainer(object):
             self.logs["training_time"].append([epoch+1, time.time()-start_time])
             if self.args.test_size > 0:
                 self.score_model(epoch)
+            z_list.append(z)
 
-        return z
+        return z_list
 
     def save_model(self):
         """

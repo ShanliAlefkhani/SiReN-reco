@@ -46,19 +46,6 @@ class SiReN(nn.Module):
         self.E2 = nn.Parameter(torch.empty(self.M + self.N, dim))
         nn.init.xavier_normal_(self.E2.data)
 
-        args2 = parameter_parser()
-        tab_printer(args2)
-        edges = read_graph(args2)
-        edges2 = {
-            "positive_edges": torch.transpose(self.data_p.to_dict()["edge_index"], 0, 1).tolist(),
-            "negative_edges": torch.transpose(self.data_n.to_dict()["edge_index"], 0, 1).tolist(),
-            "ecount": 0,
-            "ncount": self.M + self.N,
-        }
-        trainer = SignedGCNTrainer(args2, edges2)
-        trainer.setup_dataset()
-        self.z = trainer.create_and_train_model()
-
         for _ in range(MLP_layers):
             self.mlps.append(nn.Linear(dim, dim, bias=True))
             nn.init.xavier_normal_(self.mlps[-1].weight.data)
