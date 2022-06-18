@@ -15,29 +15,31 @@ def main(args):
     sum_eval_p = [0,0,0,0,0]
     sum_eval_r = [0,0,0,0,0]
     sum_eval_n = [0,0,0,0,0]
-    iteration = 5
+    iteration = 1
     for i in range(iteration):
         train, test = data_class.data_load()
         train = train.astype({'userId': 'int64', 'movieId': 'int64'})
         offset = args.offset
 
-        edge_user = torch.tensor(train[train['rating'] > offset]['userId'].values - 1)
-        edge_item = torch.tensor(train[train['rating'] > offset]['movieId'].values - 1) + data_class.num_u
+        edge_user = train[train['rating'] > offset]['userId'].values - 1
+        edge_item = train[train['rating'] > offset]['movieId'].values - 1 + data_class.num_u
 
-        edge_user_n = torch.tensor(train[train['rating'] <= offset]['userId'].values - 1)
-        edge_item_n = torch.tensor(train[train['rating'] <= offset]['movieId'].values - 1) + data_class.num_u
+        edge_user_n = train[train['rating'] <= offset]['userId'].values - 1
+        edge_item_n = train[train['rating'] <= offset]['movieId'].values - 1 + data_class.num_u
 
-        edge_p = torch.stack((torch.cat((edge_user, edge_item), 0), torch.cat((edge_item, edge_user), 0)), 0)
-        data_p = Data(edge_index=edge_p)
+        data_p = [[edge_user[i],edge_item[i]] for i in range(len(edge_user))]
+        data_n = [[edge_user_n[i],edge_item_n[i]] for i in range(len(edge_user_n))]
+        #edge_p = torch.stack((torch.cat((edge_user, edge_item), 0), torch.cat((edge_item, edge_user), 0)), 0)
+        #data_p = Data(edge_index=edge_p)
 
-        edge_n = torch.stack((torch.cat((edge_user_n, edge_item_n), 0), torch.cat((edge_item_n, edge_user_n), 0)), 0)
-        data_n = Data(edge_index=edge_n)
+        #edge_n = torch.stack((torch.cat((edge_user_n, edge_item_n), 0), torch.cat((edge_item_n, edge_user_n), 0)), 0)
+        #data_n = Data(edge_index=edge_n)
 
         args2 = parameter_parser()
         tab_printer(args2)
         edges2 = {
-            "positive_edges": torch.transpose(data_p.to_dict()["edge_index"], 0, 1).tolist(),
-            "negative_edges": torch.transpose(data_n.to_dict()["edge_index"], 0, 1).tolist(),
+            "positive_edges": data_p,
+            "negative_edges": data_n,
             "ecount": 0,
             "ncount": data_class.num_u + data_class.num_v,
         }
