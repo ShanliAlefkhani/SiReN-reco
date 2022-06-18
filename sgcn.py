@@ -15,6 +15,8 @@ from signedsageconvolution import SignedSAGEConvolutionBase, SignedSAGEConvoluti
 from signedsageconvolution import ListModule
 from utils import structured_negative_sampling
 
+import matplotlib.pyplot as plt
+
 class SignedGraphConvolutionalNetwork(torch.nn.Module):
     """
     Signed Graph Convolutional Network Class.
@@ -231,10 +233,12 @@ class SignedGCNTrainer(object):
         self.model.train()
         self.epochs = trange(self.args.epochs, desc="Loss")
         z_list = []
+        diagram_data = []
         for epoch in self.epochs:
             start_time = time.time()
             self.optimizer.zero_grad()
             loss, z = self.model(self.positive_edges, self.negative_edges, self.y)
+            diagram_data.append((epoch, loss))
             loss.backward()
             self.epochs.set_description("SGCN (Loss=%g)" % round(loss.item(), 4))
             self.optimizer.step()
@@ -242,7 +246,11 @@ class SignedGCNTrainer(object):
             if self.args.test_size > 0:
                 self.score_model(epoch)
             z_list.append(z)
-
+        xdata = np.asarray([x[0] for x in diagram_data])
+        ydata = np.asarray([x[1].tolist() for x in diagram_data])
+        plt.close()
+        plt.plot(xdata, ydata, 'o')
+        plt.savefig('loss.png')
         return z_list
 
     def save_model(self):

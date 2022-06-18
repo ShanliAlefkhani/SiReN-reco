@@ -8,6 +8,9 @@ from sgcn import SignedGCNTrainer
 from param_parser import parameter_parser
 from utils import tab_printer
 
+import matplotlib.pyplot as plt
+import numpy as np
+
 
 def main(args):
     data_class = SiReNDataLoader(args.dataset, args.version)
@@ -49,6 +52,7 @@ def main(args):
 
         data_class.train = train
         data_class.test = test
+        diagram_data = []
         for EPOCH in range(len(z_list)):
             emb = z_list[EPOCH]
             emb_u, emb_v = torch.split(emb, [data_class.num_u, data_class.num_v])
@@ -67,6 +71,14 @@ def main(args):
             Recall at [10, 15, 20] :: {eval_.r['total'][eval_.N - 1]}
             nDCG at [10, 15, 20] :: {eval_.nDCG['total'][eval_.N - 1]}
             ***************************************************************************************""")
+            diagram_data.append((EPOCH, eval_.nDCG['total'][eval_.N - 1]))
+
+        plt.close()
+        for j in range(5):
+            xdata = np.asarray([x[0] for x in diagram_data])
+            ydata = np.asarray([x[1][j] for x in diagram_data])
+            plt.plot(xdata, ydata, 'o')
+        plt.savefig(f'nDCG.png')
         sum_eval_p += eval_.p['total'][eval_.N - 1]
         sum_eval_r += eval_.r['total'][eval_.N - 1]
         sum_eval_n += eval_.nDCG['total'][eval_.N - 1]
